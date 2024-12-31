@@ -5,7 +5,7 @@ import torch
 # this model uses batch normalization bc for cifar32, i can have sufficient amount of batch per GPU
 class unet_self_attention(nn.Module):
     def __init__(self, segmentation = 3, temb_dim = 256, dropout = 0.05, 
-                 channel_list = [3,64,128,256,512], attention_layer_list = [1,2], num_head = 8):
+                 channel_list = [3,64,128,256,512], attention_layer_list = [1,2], num_head = 4, greyscale = False):
         super(unet_self_attention, self).__init__()
 
         self.seg = segmentation
@@ -32,8 +32,9 @@ class unet_self_attention(nn.Module):
             #### for down cnn, it starts with 3 at i_l = 0, and ends with 512 ati_l = 3 ####
             self.down_cnn1.append(nn.Conv2d(in_channels = self.ch_list[i_l],
                                             out_channels = self.ch_list[i_l + 1],
-                                            kernel_size = 3, padding = 1))
+                                            kernel_size = 3, padding = 1).to('cuda'))
             self.down_bn1.append(nn.BatchNorm2d(num_features = self.ch_list[i_l]).to('cuda'))
+
             
             self.down_cnn2.append(nn.Conv2d(in_channels = self.ch_list[i_l + 1],
                                             out_channels = self.ch_list[i_l + 1],
@@ -100,7 +101,7 @@ class unet_self_attention(nn.Module):
         self.final_cnn = nn.Conv2d(in_channels = self.ch_list[1], out_channels = self.seg,
                                    kernel_size = 3, padding = 1).to('cuda')
         self.relu = nn.SiLU().to('cuda')
-        self.down_sample = nn.AvgPool2d(kernel_size = 2, stride = 2).to('cuda')
+        self.down_sample = nn.MaxPool2d(kernel_size = 2, stride = 2).to('cuda')
         
     
     # create the res_block
@@ -126,19 +127,18 @@ class unet_self_attention(nn.Module):
         # PE(pos = 2i+1) = cos(pos/n^(2i/d))
         n = 10000
         # create the PE tensor. 
-        emb = torch.zeros(self.temb_dim).to('cuda')
-        i = torch.arange(0, self.temb_dim/2).to('cuda')
-        sin_output = torch.sin(timesteps / torch.pow(n, 2*i/self.temb_dim)).to('cuda')
-        cos_output = torch.cos(timesteps / torch.pow(n, 2*i/self.temb_dim)).to('cuda')
-        emb[::2] = sin_output
-        emb[1::2] = cos_output
-        return emb # timesteps(1) x self.temb_dim
+        emb = torch.zeros(len(timesteps), self.temb_dim).cuda()
+        i = torch.arange(0, self.temb_dim/2).cuda()
+        sin_output = torch.sin(timesteps[:,None] / torch.pow(n, 2*i/self.temb_dim))
+        cos_output = torch.cos(timesteps[:,None] / torch.pow(n, 2*i/self.temb_dim))
+        emb[:, ::2] = sin_output
+        emb[:, 1::2] = cos_output
+        return emb # B x self.temb_dim
 
     # create the forward
     def forward(self, x, t):
         B,_,_,_ = x.shape
         time_embed = self.time_embed(t).detach()
-        time_embed = time_embed.repeat(B, 1)
         down_output_list = []
         att_idx = 0
         for i_l, (down_cnn1, down_cnn2, res_cnn, bn1, bn2, temb_fc) in enumerate(zip(self.down_cnn1, self.down_cnn2,
